@@ -6,13 +6,16 @@ use cpal::{
     SampleFormat, SampleRate, StreamError,
 };
 use iced::{
-    futures::{channel::mpsc, SinkExt, Stream, StreamExt}, stream, widget::{column, text, Column}, Font, Subscription
+    futures::{channel::mpsc, SinkExt, Stream, StreamExt},
+    stream,
+    widget::{column, text, Column},
+    window, Font, Length, Size, Subscription, Task,
 };
 use pitch_detector::{
-    note::{detect_note, detect_note_in_range, NoteDetectionResult},
-    pitch::{HannedFftDetector, PitchDetector},
+    note::{detect_note_in_range, NoteDetectionResult},
+    pitch::HannedFftDetector,
 };
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{OptionExt, Snafu};
 
 #[derive(Snafu, Debug)]
 enum Error {
@@ -50,10 +53,12 @@ struct State {
 }
 
 impl State {
-    fn update(&mut self, message: Message) {
+    fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::NewText(txt) => self.text = txt,
         }
+
+        Task::none()
     }
 
     fn view(&self) -> Column<Message> {
@@ -76,7 +81,10 @@ fn on_error(e: StreamError) {
     eprintln!("Input stream error: {}", e);
 }
 
-fn detect(mut consumer: Consumer<f32>, mut note_sender: mpsc::Sender<NoteDetectionResult>) {
+fn detect(
+    mut consumer: Consumer<f32>,
+    mut note_sender: mpsc::Sender<NoteDetectionResult>,
+) {
     let mut upscale = Vec::<f64>::with_capacity(4096);
     let mut detector = HannedFftDetector::default();
 
@@ -84,13 +92,20 @@ fn detect(mut consumer: Consumer<f32>, mut note_sender: mpsc::Sender<NoteDetecti
         upscale.clear();
         upscale.extend(signal.into_iter().map(|x| x as f64));
 
-        let result = detect_note_in_range(&upscale, &mut detector, SAMPLE_RATE.0 as _, 50.0..440.0);
+        let result = detect_note_in_range(
+            &upscale,
+            &mut detector,
+            SAMPLE_RATE.0 as _,
+            50.0..440.0,
+        );
         let note = match result {
             Some(f) => f,
             _ => continue,
         };
 
-        note_sender.try_send(note).unwrap();
+        if note_sender.try_send(note).is_err() {
+            break;
+        }
     }
 }
 
@@ -98,7 +113,11 @@ fn setup2() -> impl Stream<Item = Message> {
     stream::channel(1024, |mut output| async move {
         let mut receiver = setup().unwrap();
         while let Some(r) = receiver.next().await {
-            let text = format!("{:3} {}", r.note_name.to_string(), r.actual_freq.round());
+            let text = format!(
+                "{:3} {}",
+                r.note_name.to_string(),
+                r.actual_freq.round()
+            );
             if output.send(Message::NewText(text)).await.is_err() {
                 break;
             }
@@ -128,7 +147,7 @@ fn setup() -> Result<mpsc::Receiver<NoteDetectionResult>, Error> {
 
     let stream = device.build_input_stream(
         &config.into(),
-        move |data, info| producer.write(data),
+        move |data, _info| producer.write(data),
         on_error,
         None,
     )?;
@@ -136,15 +155,18 @@ fn setup() -> Result<mpsc::Receiver<NoteDetectionResult>, Error> {
     stream.play()?;
     std::mem::forget(stream);
 
-    let detect_thread = std::thread::spawn(move || detect(consumer, note_sender));
+    let _detect_thread =
+        std::thread::spawn(move || detect(consumer, note_sender));
 
     Ok(note_receiver)
 }
 
 fn main() -> Result<(), Error> {
     iced::application("Pitch Display", State::update, State::view)
+        .window_size(Size::new(300., 75.))
         .subscription(State::subscription)
         .transparent(true)
+        .resizable(false)
         .run()?;
 
     // TODO: Close stream

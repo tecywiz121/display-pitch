@@ -6,8 +6,9 @@ license = "AGPL-3.0-or-later"
 
 [dependencies]
 cpal = "0.15.3"
+dasp_sample = "0.11.0"
 iced = "0.13.1"
-pitch-detector = "0.3.1"
+pitch-detector = { git = "https://github.com/mherrerarendon/pitch-detector", version = "0.3.1" }
 snafu = { version = "0.8.5", features = ["rust_1_81"] }
 
 [profile.dev]

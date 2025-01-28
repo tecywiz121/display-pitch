@@ -1,4 +1,5 @@
 mod buffer;
+use dasp_sample::Sample;
 
 use buffer::Consumer;
 use cpal::{
@@ -9,10 +10,11 @@ use iced::{
     futures::{channel::mpsc, SinkExt, Stream, StreamExt},
     stream,
     widget::{column, text, Column},
-    window, Font, Length, Size, Subscription, Task,
+    Font, Size, Subscription, Task,
 };
 use pitch_detector::{
-    note::{detect_note_in_range, NoteDetectionResult},
+    core::into_frequency_domain::ToFrequencyDomain,
+    note::{detect_note_in_range, NoteDetection},
     pitch::HannedFftDetector,
 };
 use snafu::{OptionExt, Snafu};
@@ -83,14 +85,14 @@ fn on_error(e: StreamError) {
 
 fn detect(
     mut consumer: Consumer<f32>,
-    mut note_sender: mpsc::Sender<NoteDetectionResult>,
+    mut note_sender: mpsc::Sender<(NoteDetection, f64)>,
 ) {
     let mut upscale = Vec::<f64>::with_capacity(4096);
     let mut detector = HannedFftDetector::default();
 
     while let Ok(signal) = consumer.read(4096) {
         upscale.clear();
-        upscale.extend(signal.into_iter().map(|x| x as f64));
+        upscale.extend(signal.into_iter().map(|x| x.to_sample::<f64>()));
 
         let result = detect_note_in_range(
             &upscale,
@@ -99,11 +101,14 @@ fn detect(
             50.0..440.0,
         );
         let note = match result {
-            Some(f) => f,
-            _ => continue,
+            Ok(f) => f,
+            Err(_) => continue,
         };
 
-        if note_sender.try_send(note).is_err() {
+        let (_, amp) = detector.to_frequency_domain(&upscale, None);
+        let amp = amp.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
+
+        if note_sender.try_send((note, *amp)).is_err() {
             break;
         }
     }
@@ -112,12 +117,16 @@ fn detect(
 fn setup2() -> impl Stream<Item = Message> {
     stream::channel(1024, |mut output| async move {
         let mut receiver = setup().unwrap();
-        while let Some(r) = receiver.next().await {
-            let text = format!(
-                "{:3} {}",
-                r.note_name.to_string(),
-                r.actual_freq.round()
-            );
+        while let Some((r, a)) = receiver.next().await {
+            let text = if a > 1. {
+                format!(
+                    "{:3} {}",
+                    r.note_name.to_string(),
+                    r.actual_freq.round()
+                )
+            } else {
+                String::new()
+            };
             if output.send(Message::NewText(text)).await.is_err() {
                 break;
             }
@@ -125,7 +134,7 @@ fn setup2() -> impl Stream<Item = Message> {
     })
 }
 
-fn setup() -> Result<mpsc::Receiver<NoteDetectionResult>, Error> {
+fn setup() -> Result<mpsc::Receiver<(NoteDetection, f64)>, Error> {
     let host = cpal::default_host();
     let device = host.default_input_device().context(NoInputSnafu)?;
     println!("Input device: {}", device.name()?);
